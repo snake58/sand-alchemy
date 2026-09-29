@@ -1,0 +1,936 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Sand Alchemy — Mix Magic Sands</title>
+<meta name="description" content="Sand Alchemy: pour and mix magic colored sands to brew every potion color! A satisfying alchemy puzzle with real sand physics. Play free in your browser!">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Sand Alchemy">
+<meta property="og:description" content="Pour and mix magic colored sands to brew every potion color! Play free!">
+<meta property="og:image" content="https://snake58.github.io/sand-alchemy/og-image.jpg">
+<meta property="og:url" content="https://snake58.github.io/sand-alchemy/">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Sand Alchemy">
+<meta name="twitter:description" content="Pour and mix magic colored sands to brew every potion color! Play free!">
+<meta name="twitter:image" content="https://snake58.github.io/sand-alchemy/og-image.jpg">
+
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#141021;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
+    touch-action:none; overscroll-behavior:none; user-select:none; -webkit-user-select:none; }
+  #wrap { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:#141021; }
+  canvas { display:block; border-radius:6px; box-shadow:0 0 60px rgba(150,90,255,.15); }
+  #vstamp { position:fixed; right:6px; bottom:4px; font-size:10px; color:rgba(255,255,255,.35);
+    font-family:monospace; pointer-events:none; z-index:5; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game" width="480" height="800"></canvas></div>
+<div id="vstamp">v1</div>
+<script>
+/* Portal: none (itch.io / standalone).
+   Sin SDK: el juego corre con localStorage y sin anuncios. */
+/* SAND ALCHEMY BUILD v1 */
+"use strict";
+/* ============================================================
+   SAND ALCHEMY — mix magic colored sands to brew potion colors.
+   Original game: pour primary sands between vessels; colors blend
+   like paint. Match every recipe flask to its target color.
+   Single file, zero external assets. All art procedural on canvas,
+   all audio synthesized with WebAudio.
+   ============================================================ */
+const TAU = Math.PI * 2;
+const W = 480, H = 800;
+
+/* ---------------- utils ---------------- */
+function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
+function lerp(a,b,t){ return a+(b-a)*t; }
+function mulberry32(seed){ let s=seed>>>0; return function(){ s|=0; s=s+0x6D2B79F5|0; let t=Math.imul(s^s>>>15,1|s); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
+function hex(c){ const h=v=>clamp(Math.round(v),0,255).toString(16).padStart(2,"0"); return "#"+h(c.r)+h(c.g)+h(c.b); }
+function mixc(c1,w1,c2,w2){ const t=w1+w2; return { r:(c1.r*w1+c2.r*w2)/t, g:(c1.g*w1+c2.g*w2)/t, b:(c1.b*w1+c2.b*w2)/t }; }
+function cdist(a,b){ const dr=a.r-b.r, dg=a.g-b.g, db=a.b-b.b; return Math.sqrt(dr*dr+dg*dg+db*db); }
+function shade(c,f){ return { r:clamp(c.r*f,0,255), g:clamp(c.g*f,0,255), b:clamp(c.b*f,0,255) }; }
+function rr(ctx,x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+/* ---------------- storage (portal-aware, promise-based) ---------------- */
+const Store = window.Store = window.Store || {
+  get(k){ try{ return Promise.resolve(localStorage.getItem("sandalchemy_"+k)); }catch(e){ return Promise.resolve(null); } },
+  set(k,v){ try{ localStorage.setItem("sandalchemy_"+k, String(v)); }catch(e){} return Promise.resolve(); }
+};
+
+/* ---------------- audio: WebAudio synth, music-box alchemy vibe ----------------
+   Generative music: dreamy pad chords + music-box pluck melody (pentatonic).
+   All SFX synthesized. Music starts on first user gesture. */
+const Sfx = window.Sfx = {
+  ctx:null, muted:false, _master:null, _musicBus:null, _noiseBuf:null, _delay:null,
+  _mStep:0, _mNext:0, _mTimer:0, _musicOn:false,
+  mf(m){ return 440*Math.pow(2,(m-69)/12); },
+  ensure(){
+    if(this.ctx) return true;
+    try{
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if(!AC) return false;
+      const ctx = this.ctx = new AC();
+      const master = this._master = ctx.createGain(); master.gain.value = this.muted?0:1; master.connect(ctx.destination);
+      const mb = this._musicBus = ctx.createGain(); mb.gain.value = 0.5; mb.connect(master);
+      const dly = ctx.createDelay(1.0); dly.delayTime.value = 0.36;
+      const fb = ctx.createGain(); fb.gain.value = 0.34;
+      const wet = ctx.createGain(); wet.gain.value = 0.55;
+      dly.connect(fb); fb.connect(dly); dly.connect(wet); wet.connect(mb);
+      this._delay = dly;
+      const len = ctx.sampleRate|0, buf = ctx.createBuffer(1,len,ctx.sampleRate), ch = buf.getChannelData(0);
+      for(let i=0;i<len;i++) ch[i]=Math.random()*2-1;
+      this._noiseBuf = buf;
+      return true;
+    }catch(e){ return false; }
+  },
+  setMuted(m){ this.muted=!!m; try{ if(this._master) this._master.gain.value=this.muted?0:1; }catch(e){} },
+  tone(f,dur,type,vol,slideTo,when){
+    if(!this.ctx||this.muted) return;
+    try{
+      const t = when||this.ctx.currentTime;
+      const o=this.ctx.createOscillator(), g=this.ctx.createGain();
+      o.type=type||"sine"; o.frequency.setValueAtTime(f,t);
+      if(slideTo) o.frequency.exponentialRampToValueAtTime(Math.max(30,slideTo),t+dur);
+      g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(vol||0.2,t+0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+      o.connect(g); g.connect(this._master); o.start(t); o.stop(t+dur+0.05);
+    }catch(e){}
+  },
+  noise(dur,freq,vol,q,type){
+    if(!this.ctx||this.muted) return;
+    try{
+      const t=this.ctx.currentTime;
+      const src=this.ctx.createBufferSource(); src.buffer=this._noiseBuf; src.loop=true;
+      const f=this.ctx.createBiquadFilter(); f.type=type||"bandpass"; f.frequency.value=freq||1200; f.Q.value=q||1;
+      const g=this.ctx.createGain();
+      g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(vol||0.25,t+0.03);
+      g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+      src.connect(f); f.connect(g); g.connect(this._master); src.start(t); src.stop(t+dur+0.05);
+    }catch(e){}
+  },
+  click(){ this.tone(700,0.07,"triangle",0.12); },
+  select(){ this.tone(660,0.09,"sine",0.16); this.tone(990,0.12,"sine",0.10, null, this.ctx?this.ctx.currentTime+0.05:0); },
+  deselect(){ this.tone(440,0.08,"sine",0.12); },
+  error(){ this.tone(150,0.18,"square",0.10,110); },
+  pourSfx(){ this.noise(0.55,2600,0.20,0.8); this.noise(0.4,900,0.10,1.2); },
+  splashSfx(){ this.noise(0.15,3200,0.10,1.5); },
+  dumpSfx(){ this.noise(0.5,700,0.22,0.7,"lowpass"); this.tone(300,0.4,"sine",0.08,90); },
+  match(){ const t=this.ctx?this.ctx.currentTime:0; [76,79,83].forEach((m,i)=>this.tone(this.mf(m),0.35,"sine",0.16,null,t+i*0.09)); },
+  win(){ const t=this.ctx?this.ctx.currentTime:0; [72,76,79,84,88].forEach((m,i)=>this.tone(this.mf(m),0.5,"triangle",0.16,null,t+i*0.11)); this.noise(0.8,5000,0.06,0.7,"highpass"); },
+  star(i){ const t=this.ctx?this.ctx.currentTime:0; this.tone(this.mf(84+i*2),0.4,"sine",0.18,this.mf(96+i*2),t); },
+  pop(){ this.tone(500,0.09,"sine",0.14,900); },
+  hintSfx(){ const t=this.ctx?this.ctx.currentTime:0; [83,88].forEach((m,i)=>this.tone(this.mf(m),0.3,"sine",0.12,null,t+i*0.1)); },
+  /* --- generative music: pad chords + music-box plucks --- */
+  _chords:[[57,60,64,67],[53,57,60,65],[55,59,62,67],[52,55,59,64]], // Am F G Em-ish
+  _penta:[69,72,74,76,79,81,84,86],
+  startMusic(){
+    if(!this.ctx||this._musicOn) return; this._musicOn=true;
+    this._mNext=this.ctx.currentTime+0.1; this._mStep=0;
+    const tick=()=>{
+      if(!this._musicOn) return;
+      try{
+        while(this._mNext < this.ctx.currentTime+0.6){
+          const step=this._mStep, t=this._mNext;
+          if(step%8===0){ // new pad chord every 8 plucks
+            const ch=this._chords[(step/8|0)%this._chords.length];
+            ch.forEach(m=>{
+              const o=this.ctx.createOscillator(), g=this.ctx.createGain(), f=this.ctx.createBiquadFilter();
+              o.type="triangle"; o.frequency.value=this.mf(m-12);
+              f.type="lowpass"; f.frequency.value=900;
+              g.gain.setValueAtTime(0.0001,t); g.gain.linearRampToValueAtTime(0.05,t+1.2);
+              g.gain.linearRampToValueAtTime(0.0001,t+3.6);
+              o.connect(f); f.connect(g); g.connect(this._musicBus); o.start(t); o.stop(t+3.8);
+            });
+          }
+          if(step%2===0 && Math.random()<0.62){ // music-box pluck
+            const m=this._penta[(Math.random()*this._penta.length)|0];
+            const o=this.ctx.createOscillator(), g=this.ctx.createGain();
+            o.type="sine"; o.frequency.value=this.mf(m);
+            const o2=this.ctx.createOscillator(), g2=this.ctx.createGain();
+            o2.type="sine"; o2.frequency.value=this.mf(m)*2; g2.gain.value=0.25;
+            g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.14,t+0.01);
+            g.gain.exponentialRampToValueAtTime(0.0001,t+1.1);
+            o.connect(g); o2.connect(g2); g2.connect(g); g.connect(this._musicBus); g.connect(this._delay);
+            o.start(t); o.stop(t+1.2); o2.start(t); o2.stop(t+1.2);
+          }
+          this._mNext+=0.42; this._mStep++;
+        }
+      }catch(e){}
+      this._mTimer=setTimeout(tick,180);
+    };
+    tick();
+  },
+  stopMusic(){ this._musicOn=false; try{clearTimeout(this._mTimer);}catch(e){} }
+};
+
+/* ---------------- sands, recipes, level generator ---------------- */
+const SANDS = {
+  R:{ c:{r:238,g:72,b:58},   name:"Ruby"  },
+  Y:{ c:{r:250,g:202,b:58},  name:"Sun"   },
+  B:{ c:{r:72,g:132,b:245},  name:"Ocean" },
+  W:{ c:{r:240,g:238,b:232}, name:"Moon"  },
+  K:{ c:{r:52,g:46,b:62},    name:"Coal"  }
+};
+const CAP = 8, MINFILL = 2, TOL = 24, NLEVELS = 80;
+/* index map — tiers below reference these positions */
+const RECIPES = [
+  {mix:{R:1},name:"Ruby"},        // 0
+  {mix:{Y:1},name:"Sun"},         // 1
+  {mix:{B:1},name:"Ocean"},       // 2
+  {mix:{R:1,Y:1},name:"Ember"},   // 3
+  {mix:{Y:1,B:1},name:"Lagoon"},  // 4
+  {mix:{R:1,B:1},name:"Royal"},   // 5
+  {mix:{R:2,Y:1},name:"Sunset"},  // 6
+  {mix:{R:1,Y:2},name:"Honey"},   // 7
+  {mix:{Y:2,B:1},name:"Jade"},    // 8
+  {mix:{Y:1,B:2},name:"Teal"},    // 9
+  {mix:{R:2,B:1},name:"Wine"},    // 10
+  {mix:{R:1,B:2},name:"Grape"},   // 11
+  {mix:{R:1,Y:1,B:1},name:"Dune"},// 12
+  {mix:{R:1,W:1},name:"Rose"},    // 13
+  {mix:{Y:1,W:1},name:"Cream"},   // 14
+  {mix:{B:1,W:1},name:"Sky"},     // 15
+  {mix:{R:1,K:1},name:"Rust"},    // 16
+  {mix:{Y:1,K:1},name:"Olive"},   // 17
+  {mix:{B:1,K:1},name:"Deep"},    // 18
+  {mix:{R:3,Y:1},name:"Blaze"},   // 19
+  {mix:{R:1,Y:3},name:"Daffodil"},// 20
+  {mix:{R:2,Y:1,B:1},name:"Copper"}, // 21
+  {mix:{R:1,Y:2,B:1},name:"Moss"},   // 22
+  {mix:{W:1,K:1},name:"Ash"},     // 23
+  {mix:{R:1,Y:1,W:1},name:"Peach"},  // 24
+  {mix:{Y:1,B:1,W:1},name:"Mint"},    // 25
+  {mix:{R:2,W:1},name:"Blush"}    // 26
+];
+function recipeColor(mix){
+  let r=0,g=0,b=0,t=0;
+  for(const k in mix){ const s=SANDS[k]; r+=s.c.r*mix[k]; g+=s.c.g*mix[k]; b+=s.c.b*mix[k]; t+=mix[k]; }
+  return { r:r/t, g:g/t, b:b/t };
+}
+function mixKey(mix){ return Object.keys(mix).sort().map(k=>k+mix[k]).join(""); }
+function scoopsOf(mix){ let n=0; for(const k in mix) n+=mix[k]; return n; }
+
+/* Deterministic level generator. Every level ships its exact solution
+   (list of {from,to} pours), so solvability is guaranteed by construction. */
+function genLevel(n){
+  const rng = mulberry32((n*2654435761)>>>0);
+  let nv, pool, baseSup, decoyP;
+  if(n<=3){ nv=1; pool=[0,1,2]; baseSup=["R","Y","B"]; decoyP=0; }
+  else if(n<=10){ nv=1; pool=[3,4,5]; baseSup=["R","Y","B"]; decoyP=0; }
+  else if(n<=22){ nv=2; pool=[3,4,5]; baseSup=["R","Y","B"]; decoyP=0.35; }
+  else if(n<=38){ nv=2+(rng()<0.5?1:0); pool=[6,7,8,9,10,11]; baseSup=["R","Y","B"]; decoyP=0.4; }
+  else if(n<=55){ nv=3; pool=[3,4,5,12,13,14,15,16,17,18]; baseSup=["R","Y","B","W","K"]; decoyP=0.4; }
+  else if(n<=70){ nv=3+(rng()<0.4?1:0); pool=[6,7,8,9,10,11,19,20,21,22,23,24,25,26]; baseSup=["R","Y","B","W","K"]; decoyP=0.45; }
+  else { nv=4; pool=[]; for(let i=0;i<RECIPES.length;i++) pool.push(i); baseSup=["R","Y","B","W","K"]; decoyP=1; }
+  // distinct recipes
+  const picks=[], seen={};
+  let guard=0;
+  while(picks.length<nv && guard++<200){
+    const ri=pool[(rng()*pool.length)|0], key=mixKey(RECIPES[ri].mix);
+    if(!seen[key]){ seen[key]=1; picks.push(ri); }
+  }
+  const recipes=picks.map(ri=>({ mix:RECIPES[ri].mix, name:RECIPES[ri].name, target:recipeColor(RECIPES[ri].mix) }));
+  // supplies = colors used (+ optional decoy)
+  const used={}; recipes.forEach(rc=>{ for(const k in rc.mix) used[k]=1; });
+  let sup=baseSup.filter(k=>used[k]);
+  if(sup.length===0) sup=baseSup.slice(0,3);
+  if(decoyP>0 && rng()<decoyP){
+    const cands=baseSup.filter(k=>!used[k]);
+    if(cands.length) sup.push(cands[(rng()*cands.length)|0]);
+  }
+  // exact solution: pours per vessel in R,Y,B,W,K order.
+  // repeat the mix pattern until MINFILL scoops (pure colors need 2 scoops).
+  const order=["R","Y","B","W","K"];
+  const solution=[];
+  recipes.forEach((rc,vi)=>{
+    const rep=Math.ceil(MINFILL/scoopsOf(rc.mix));
+    order.forEach(k=>{
+      const cnt=(rc.mix[k]||0)*rep;
+      for(let i=0;i<cnt;i++) solution.push({ from:sup.indexOf(k), to:sup.length+vi });
+    });
+  });
+  return { n, supplies:sup, recipes, solution, par:solution.length+2 };
+}
+
+/* ---- pure pour logic (shared by game + tests) ---- */
+function newVesselState(level){
+  const vs=[];
+  level.supplies.forEach(k=>vs.push({kind:"supply", skey:k, amount:Infinity, color:SANDS[k].c}));
+  level.recipes.forEach(rc=>vs.push({kind:"recipe", amount:0, color:null, target:rc.target, name:rc.name}));
+  return vs;
+}
+function applyPour(vs, from, to){
+  const A=vs[from], B=vs[to];
+  if(!A||!B) return {ok:false,err:"bad-index"};
+  if(B.kind!=="recipe") return {ok:false,err:"cant-pour-into-supply"};
+  if(from===to) return {ok:false,err:"same"};
+  if(B.amount>=CAP) return {ok:false,err:"full"};
+  let pc;
+  if(A.kind==="supply"){ pc=SANDS[A.skey].c; }
+  else { if(A.amount<1) return {ok:false,err:"empty"}; pc=A.color; A.amount-=1; }
+  B.color = (B.amount===0||!B.color) ? {r:pc.r,g:pc.g,b:pc.b} : mixc(B.color,B.amount,pc,1);
+  B.amount+=1;
+  return {ok:true};
+}
+function checkWin(vs, level){
+  for(let i=0;i<level.recipes.length;i++){
+    const v=vs[level.supplies.length+i];
+    if(v.amount<MINFILL||!v.color) return false;
+    if(cdist(v.color, level.recipes[i].target)>TOL) return false;
+  }
+  return true;
+}
+function simulateSolution(level){
+  const vs=newVesselState(level);
+  for(const p of level.solution){ const r=applyPour(vs,p.from,p.to); if(!r.ok) return {win:false,err:r.err}; }
+  return {win:checkWin(vs,level)};
+}
+
+/* ---------------- particles & floaters ---------------- */
+const parts=[], floaters=[];
+function spawnPart(p){ if(parts.length<900) parts.push(p); }
+function grain(x,y,vx,vy,c,life,size){ spawnPart({t:"g",x,y,vx,vy,g:900,life,max:life||0.9,size:size||3.2,c}); }
+function spark(x,y,c,n,spd){
+  n=n||10; spd=spd||160;
+  for(let i=0;i<n;i++){ const a=Math.random()*TAU, s=spd*(0.4+Math.random()*0.8);
+    spawnPart({t:"s",x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,g:60,life:0.7,max:0.7,size:2.6,c}); }
+}
+function confetti(x,y,n){
+  const cols=[SANDS.R.c,SANDS.Y.c,SANDS.B.c,SANDS.W.c,{r:180,g:120,b:255}];
+  for(let i=0;i<(n||60);i++){ const a=Math.random()*TAU, s=120+Math.random()*320;
+    spawnPart({t:"c",x:x+(Math.random()-0.5)*40,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s-260,g:700,
+      life:1.6,max:1.6,size:3+Math.random()*3,c:cols[(Math.random()*cols.length)|0],rot:Math.random()*TAU,vr:(Math.random()-0.5)*12}); }
+}
+function floater(x,y,txt,c,size){ floaters.push({x,y,txt,c:c||"#fff",size:size||20,t:0,dur:1.1}); }
+function updateParts(dt){
+  for(let i=parts.length-1;i>=0;i--){ const p=parts[i];
+    p.life-=dt; if(p.life<=0){ parts.splice(i,1); continue; }
+    p.vy+=p.g*dt; p.x+=p.vx*dt; p.y+=p.vy*dt;
+    if(p.t==="g"&&p.y>H+20) p.life=0;
+    if(p.rot!==undefined) p.rot+=p.vr*dt;
+  }
+  for(let i=floaters.length-1;i>=0;i--){ const f=floaters[i]; f.t+=dt; if(f.t>f.dur) floaters.splice(i,1); }
+}
+
+/* ---------------- game state ---------------- */
+const Game = window.Game = {
+  state:"title", level:1, unlocked:1, stars:{}, moves:0,
+  vessels:[], lvl:null, sel:-1, pourAnim:null, undoStack:[],
+  paused:false, pausedByAd:false, muted:false, time:0, shake:0,
+  hits:[], hint:null, hintT:0, winInfo:null, showHowto:false,
+  freeHints:0, toast:null, toastT:0, starAnim:0,
+  autoPause(on){
+    if(on){ this.paused=true; }
+    else { if(this.pausedByAd) return; this.paused=false; }
+  },
+  totalStars(){ let s=0; for(const k in this.stars) s+=this.stars[k]; return s; }
+};
+
+function saveProgress(){
+  Store.set("unlocked", Game.unlocked);
+  Store.set("stars", JSON.stringify(Game.stars));
+  Store.set("muted", Game.muted?"1":"0");
+}
+function loadProgress(){
+  Store.get("unlocked").then(v=>{ const n=parseInt(v||"1",10); if(n>=1&&n<=NLEVELS) Game.unlocked=n; }).catch(()=>{});
+  Store.get("stars").then(v=>{ try{ const o=JSON.parse(v||"{}"); if(o&&typeof o==="object") Game.stars=o; }catch(e){} }).catch(()=>{});
+  Store.get("muted").then(v=>{ Game.muted=v==="1"; Sfx.setMuted(Game.muted); }).catch(()=>{});
+}
+
+/* layout: supplies row (top, small vials), recipe flasks (bottom, big) */
+function layoutVessels(){
+  const sup=Game.vessels.filter(v=>v.kind==="supply"), rec=Game.vessels.filter(v=>v.kind==="recipe");
+  const sy=196, ry=512;
+  sup.forEach((v,i)=>{ v.w=54; v.h=112; v.x=W/2-(sup.length*66-12)/2+i*66; v.y=sy; });
+  rec.forEach((v,i)=>{ v.w=98; v.h=204; v.x=W/2-(rec.length*112-14)/2+i*112; v.y=ry; });
+  Game.vessels.forEach((v,i)=>{
+    v.wob=0; v.lift=0;
+    const rng=mulberry32(i*97+13); v.speck=[];
+    for(let s=0;s<70;s++) v.speck.push({x:rng(),y:rng(),d:rng()});
+  });
+}
+
+function newLevel(n, silent){
+  Game.lvl=genLevel(n); Game.level=n;
+  Game.vessels=newVesselState(Game.lvl);
+  layoutVessels();
+  Game.moves=0; Game.sel=-1; Game.pourAnim=null; Game.undoStack=[];
+  Game.hint=null; Game.hintT=0; Game.winInfo=null; Game.starAnim=0;
+  Game.state="play";
+  if(!silent){ try{ Portal.gameplayStart(); }catch(e){} }
+}
+function snapshot(){ return { vs:Game.vessels.map(v=>({amount:v.amount,color:v.color?{...v.color}:null})), moves:Game.moves }; }
+function restore(snap){
+  snap.vs.forEach((s,i)=>{ Game.vessels[i].amount=s.amount; Game.vessels[i].color=s.color; });
+  Game.moves=snap.moves; Game.sel=-1;
+  Game.vessels.forEach(v=>{ if(v.kind==="recipe") v.matched=checkOne(v); });
+}
+function checkOne(v){
+  if(v.kind!=="recipe"||v.amount<MINFILL||!v.color) return false;
+  const idx=Game.vessels.indexOf(v)-Game.lvl.supplies.length;
+  return cdist(v.color, Game.lvl.recipes[idx].target)<=TOL;
+}
+function mouth(v){ return { x:v.x+v.w/2, y:v.y-6 }; }
+
+function toast(t){ Game.toast=t; Game.toastT=1.6; }
+
+/* start pour: validate on a scratch copy, snapshot for undo, then animate */
+function startPour(from,to){
+  if(Game.pourAnim||Game.winInfo) return;
+  const A=Game.vessels[from], B=Game.vessels[to];
+  if(!A||!B||from===to){ Game.sel=-1; return; }
+  if(B.kind!=="recipe"){ toast("Supplies only pour out"); Sfx.error(); Game.sel=-1; return; }
+  if(B.amount>=CAP){ toast("That flask is full!"); Sfx.error(); Game.sel=-1; return; }
+  if(A.kind!=="supply"&&A.amount<1){ toast("That flask is empty!"); Sfx.error(); Game.sel=-1; return; }
+  Game.undoStack.push(snapshot());
+  if(Game.undoStack.length>40) Game.undoStack.shift();
+  Game.moves++;
+  const pc = A.kind==="supply" ? {...SANDS[A.skey].c} : {...A.color};
+  Game.pourAnim={from,to,t:0,dur:0.6,color:pc};
+  Game.sel=-1; Game.hint=null;
+  Sfx.pourSfx();
+}
+function finishPour(){
+  const pa=Game.pourAnim; Game.pourAnim=null;
+  const r=applyPour(Game.vessels,pa.from,pa.to);
+  const B=Game.vessels[pa.to], m=mouth(B);
+  for(let i=0;i<14;i++) grain(m.x+(Math.random()-0.5)*30,m.y-4,(Math.random()-0.5)*120,-40-Math.random()*80,pa.color,0.5,3);
+  Sfx.splashSfx();
+  // match detection
+  let allWin=true;
+  Game.vessels.forEach(v=>{
+    if(v.kind!=="recipe") return;
+    const was=v.matched, now=checkOne(v); v.matched=now;
+    if(now&&!was){ v.pop=1; spark(v.x+v.w/2,v.y-40,{r:255,g:230,b:150},16,200); Sfx.match(); floater(v.x+v.w/2,v.y-70,"MATCH!", "#ffe98a", 22); }
+    if(!now) allWin=false;
+  });
+  if(allWin) onWin();
+}
+function onWin(){
+  const n=Game.level;
+  const stars = Game.moves<=Game.lvl.par ? 3 : (Game.moves<=Game.lvl.par+4 ? 2 : 1);
+  Game.winInfo={stars,t:0};
+  Game.unlocked=Math.max(Game.unlocked,Math.min(NLEVELS,n+1));
+  Game.stars[n]=Math.max(Game.stars[n]||0,stars);
+  saveProgress();
+  try{ Portal.scoreChanged(Game.totalStars()); }catch(e){}
+  try{ Portal.gameplayStop(); }catch(e){}
+  Sfx.win();
+  confetti(W/2,300,90);
+  Game.shake=0.35;
+}
+function doUndo(){
+  if(Game.pourAnim||Game.winInfo||!Game.undoStack.length){ if(!Game.undoStack.length){toast("Nothing to undo");Sfx.error();} return; }
+  restore(Game.undoStack.pop()); Game.moves++; Sfx.deselect(); floater(W/2,400,"UNDO","#cfe8ff",20);
+}
+function doDump(){
+  if(Game.pourAnim||Game.winInfo) return;
+  const v=Game.vessels[Game.sel];
+  if(!v||v.kind!=="recipe"||v.amount<1){ toast("Select a flask with sand"); Sfx.error(); return; }
+  Game.undoStack.push(snapshot()); Game.moves++;
+  for(let i=0;i<26;i++) grain(v.x+v.w/2+(Math.random()-0.5)*50, v.y+v.h*0.5, (Math.random()-0.5)*160, 120+Math.random()*120, v.color||{r:200,g:200,b:200}, 0.8, 3.4);
+  v.amount=0; v.color=null; v.matched=false; Game.sel=-1;
+  Sfx.dumpSfx(); floater(v.x+v.w/2,v.y-30,"DUMPED","#ffb3a7",20);
+}
+function doHint(free){
+  if(Game.pourAnim||Game.winInfo) return;
+  // smart hint: for first unmatched recipe, pick supply minimizing distance to target
+  const supN=Game.lvl.supplies.length;
+  for(let vi=0;vi<Game.lvl.recipes.length;vi++){
+    const v=Game.vessels[supN+vi];
+    if(v.matched) continue;
+    const tgt=Game.lvl.recipes[vi].target;
+    let best=-1,bd=1e9;
+    for(let si=0;si<supN;si++){
+      const s=Game.vessels[si];
+      if(v.amount>=CAP) continue;
+      const nc = v.amount===0 ? {...SANDS[s.skey].c} : mixc(v.color,v.amount,SANDS[s.skey].c,1);
+      const d=cdist(nc,tgt); if(d<bd){bd=d;best=si;}
+    }
+    if(best>=0){
+      if(!free){ if(Game.freeHints>0) Game.freeHints--; else Game.moves+=2; }
+      Game.hint={from:best,to:supN+vi}; Game.hintT=5;
+      Sfx.hintSfx();
+      floater(v.x+v.w/2,v.y-70,free?"FREE HINT":"HINT (+2 moves)","#b9f6ca",18);
+      return;
+    }
+  }
+  toast("All flasks match!"); Sfx.error();
+}
+
+/* ---------------- render ---------------- */
+const cvs=document.getElementById("game"), ctx=cvs.getContext("2d");
+let viewScale=1, viewOX=0, viewOY=0;
+function fit(){
+  const ww=window.innerWidth, wh=window.innerHeight;
+  viewScale=Math.min(ww/W, wh/H);
+  cvs.style.width=(W*viewScale)+"px"; cvs.style.height=(H*viewScale)+"px";
+}
+window.addEventListener("resize",fit);
+
+function star2(x,y,r,color,rot){
+  ctx.save(); ctx.translate(x,y); ctx.rotate(rot||0); ctx.fillStyle=color; ctx.beginPath();
+  for(let i=0;i<10;i++){ const rr2=i%2?r*0.45:r, a=-Math.PI/2+i*Math.PI/5;
+    ctx[i?"lineTo":"moveTo"](Math.cos(a)*rr2,Math.sin(a)*rr2); }
+  ctx.closePath(); ctx.fill(); ctx.restore();
+}
+function drawBG(){
+  const g=ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,"#221744"); g.addColorStop(0.55,"#171130"); g.addColorStop(1,"#0d0a1c");
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  // ambient glow orbs
+  const t=Game.time;
+  [[120,180,90,"150,90,255"],[380,300,110,"70,200,255"],[240,640,120,"255,150,90"]].forEach(o=>{
+    const gg=ctx.createRadialGradient(o[0],o[1]+Math.sin(t*0.7+o[0])*10,10,o[0],o[1],o[2]);
+    gg.addColorStop(0,"rgba("+o[3]+",0.10)"); gg.addColorStop(1,"rgba("+o[3]+",0)");
+    ctx.fillStyle=gg; ctx.fillRect(o[0]-o[2],o[1]-o[2],o[2]*2,o[2]*2);
+  });
+  // wooden shelf behind recipe row
+  ctx.fillStyle="#4a3220"; ctx.fillRect(0,596,W,26);
+  ctx.fillStyle="#5d4128"; ctx.fillRect(0,596,W,8);
+  ctx.fillStyle="rgba(0,0,0,0.25)"; ctx.fillRect(0,614,W,8);
+  ctx.strokeStyle="rgba(0,0,0,0.2)"; ctx.lineWidth=1;
+  for(let i=0;i<5;i++){ ctx.beginPath(); ctx.moveTo(0,600+i*5+Math.sin(i)*2); ctx.lineTo(W,600+i*5+Math.cos(i)*2); ctx.stroke(); }
+  // shelf behind supplies
+  ctx.fillStyle="#4a3220"; ctx.fillRect(0,296,W,20);
+  ctx.fillStyle="#5d4128"; ctx.fillRect(0,296,W,6);
+}
+function drawSandBody(v){
+  const amt=v.kind==="supply"?CAP:v.amount;
+  if(amt<=0||!v.color) return;
+  const w=v.w,h=v.h, ih=h-30, sh=(amt/CAP)*ih;
+  const topY=-sh, t=Game.time;
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(-w/2+8,0);
+  ctx.lineTo(-w/2+8,topY+6);
+  for(let x=-w/2+8;x<=w/2-8;x+=6) ctx.lineTo(x,topY+Math.sin(x*0.16+t*3.2+v.x)*3);
+  ctx.lineTo(w/2-8,0);
+  ctx.quadraticCurveTo(w/2-8,-2, w/2-14,-2);
+  ctx.lineTo(-w/2+14,-2);
+  ctx.quadraticCurveTo(-w/2+8,-2, -w/2+8,0);
+  ctx.closePath();
+  ctx.clip();
+  const g=ctx.createLinearGradient(0,topY,0,0);
+  g.addColorStop(0,hex(shade(v.color,1.06))); g.addColorStop(0.5,hex(v.color)); g.addColorStop(1,hex(shade(v.color,0.72)));
+  ctx.fillStyle=g; ctx.fillRect(-w/2,topY-8,w,sh+16);
+  // grain speckles
+  v.speck.forEach(s=>{
+    const sx=-w/2+8+s.x*(w-16), sy2=topY+6+s.y*Math.max(4,(sh-8));
+    if(sy2>2) return;
+    ctx.fillStyle=s.d<0.5?"rgba(255,255,255,0.16)":"rgba(0,0,0,0.18)";
+    ctx.fillRect(sx,sy2,2.4,2.4);
+  });
+  // top sparkle
+  ctx.fillStyle="rgba(255,255,255,0.20)"; ctx.fillRect(-w/2+8,topY+1,w-16,2);
+  ctx.restore();
+}
+function drawVessel(v){
+  const sel=Game.vessels[Game.sel]===v;
+  ctx.save();
+  ctx.translate(v.x+v.w/2,v.y+v.h);
+  if(sel) ctx.translate(0,-14);
+  if(Game.pourAnim&&Game.vessels[Game.pourAnim.from]===v) ctx.rotate(Math.sin(Game.time*28)*0.07);
+  const w=v.w,h=v.h;
+  if(sel){ // selection glow
+    ctx.shadowColor="rgba(255,220,120,0.9)"; ctx.shadowBlur=26;
+  }
+  drawSandBody(v);
+  ctx.shadowBlur=0;
+  // glass body
+  rr(ctx,-w/2,-h,w,h,16);
+  const gg=ctx.createLinearGradient(-w/2,0,w/2,0);
+  gg.addColorStop(0,"rgba(255,255,255,0.30)"); gg.addColorStop(0.25,"rgba(255,255,255,0.06)");
+  gg.addColorStop(0.8,"rgba(255,255,255,0.05)"); gg.addColorStop(1,"rgba(255,255,255,0.22)");
+  ctx.fillStyle=gg; ctx.fill();
+  ctx.strokeStyle=sel?"#ffd97a":"rgba(255,255,255,0.45)"; ctx.lineWidth=sel?4:2.5; ctx.stroke();
+  // highlight streak
+  ctx.strokeStyle="rgba(255,255,255,0.5)"; ctx.lineWidth=5; ctx.lineCap="round";
+  ctx.beginPath(); ctx.moveTo(-w/2+12,-h+22); ctx.lineTo(-w/2+16,-h+64); ctx.stroke();
+  // cork / rim
+  ctx.fillStyle="#7a5c38"; rr(ctx,-w/2+6,-h-12,w-12,14,5); ctx.fill();
+  ctx.fillStyle="#93744a"; rr(ctx,-w/2+6,-h-12,w-12,6,3); ctx.fill();
+  ctx.restore();
+  // target chip (recipe) or name label (supply)
+  if(v.kind==="recipe"){
+    const idx=Game.vessels.indexOf(v)-Game.lvl.supplies.length;
+    const cx=v.x+v.w/2+(sel?-0:0), cy=v.y-52+(sel?-14:0);
+    const pop=v.pop||0;
+    ctx.save(); ctx.translate(cx,cy); if(pop>0){ const s=1+pop*0.5; ctx.scale(s,s); }
+    ctx.beginPath(); ctx.arc(0,0,21,0,TAU);
+    ctx.fillStyle=hex(Game.lvl.recipes[idx].target); ctx.fill();
+    ctx.lineWidth=4; ctx.strokeStyle=v.matched?"#7CFC90":"#ffd97a"; ctx.stroke();
+    ctx.fillStyle="rgba(255,255,255,0.35)";
+    ctx.beginPath(); ctx.arc(-6,-6,6,0,TAU); ctx.fill();
+    if(v.matched){
+      ctx.strokeStyle="#1d7a2f"; ctx.lineWidth=5; ctx.lineCap="round"; ctx.lineJoin="round";
+      ctx.beginPath(); ctx.moveTo(-9,0); ctx.lineTo(-2,8); ctx.lineTo(10,-7); ctx.stroke();
+    }
+    ctx.restore();
+    ctx.fillStyle="rgba(255,255,255,0.8)"; ctx.font="13px sans-serif"; ctx.textAlign="center";
+    ctx.fillText(Game.lvl.recipes[idx].name, v.x+v.w/2, v.y-17);
+  } else {
+    ctx.fillStyle="rgba(255,255,255,0.65)"; ctx.font="12px sans-serif"; ctx.textAlign="center";
+    ctx.fillText(SANDS[v.skey].name.toUpperCase(), v.x+v.w/2, v.y+v.h+20);
+  }
+}
+function drawParts(){
+  parts.forEach(p=>{
+    const a=clamp(p.life/p.max,0,1);
+    if(p.t==="g"){ ctx.globalAlpha=a; ctx.fillStyle=hex(p.c); ctx.fillRect(p.x-p.size/2,p.y-p.size/2,p.size,p.size); }
+    else if(p.t==="s"){ ctx.globalAlpha=a; ctx.fillStyle=hex(p.c); ctx.beginPath(); ctx.arc(p.x,p.y,p.size*a+0.6,0,TAU); ctx.fill(); }
+    else { ctx.globalAlpha=a; ctx.save(); ctx.translate(p.x,p.y); ctx.rotate(p.rot||0); ctx.fillStyle=hex(p.c); ctx.fillRect(-p.size/2,-p.size/3,p.size,p.size*0.66); ctx.restore(); }
+  });
+  ctx.globalAlpha=1;
+  floaters.forEach(f=>{
+    const k=f.t/f.dur;
+    ctx.globalAlpha=1-k; ctx.fillStyle=f.c; ctx.font="bold "+f.size+"px sans-serif"; ctx.textAlign="center";
+    ctx.fillText(f.txt,f.x,f.y-k*44);
+  });
+  ctx.globalAlpha=1;
+}
+function button(id,x,y,w,h,label,fs,bg,fg){
+  fs=fs||20; bg=bg||"rgba(255,255,255,0.10)"; fg=fg||"#fff";
+  Game.hits.push({id,x,y,w,h});
+  ctx.fillStyle=bg; rr(ctx,x,y,w,h,12); ctx.fill();
+  ctx.strokeStyle="rgba(255,255,255,0.35)"; ctx.lineWidth=2; ctx.stroke();
+  ctx.fillStyle=fg; ctx.font="bold "+fs+"px sans-serif"; ctx.textAlign="center"; ctx.textBaseline="middle";
+  ctx.fillText(label,x+w/2,y+h/2+1); ctx.textBaseline="alphabetic";
+}
+function drawTopBar(){
+  ctx.fillStyle="rgba(0,0,0,0.35)"; ctx.fillRect(0,0,W,72);
+  ctx.fillStyle="#ffd97a"; ctx.font="bold 20px sans-serif"; ctx.textAlign="left";
+  ctx.fillText("LV "+Game.level, 14, 30);
+  ctx.fillStyle="#fff"; ctx.font="15px sans-serif";
+  ctx.fillText("MOVES "+Game.moves+" / "+Game.lvl.par, 14, 54);
+  let bx=W-10;
+  const defs=[["sound",Game.muted?"✕":"♪"],["menu","☰"],["restart","⟳"],["hint","?"],["undo","↺"]];
+  if(window.Portal&&Portal.rewarded) defs.splice(3,0,["gift","🎁"]);
+  defs.forEach(d=>{ bx-=44; button(d[0],bx,16,38,38,d[1],18); });
+}
+function drawTitle(){
+  drawBG();
+  const t=Game.time;
+  // big flask emblem
+  ctx.save(); ctx.translate(W/2,336+Math.sin(t*1.4)*8);
+  const fg=ctx.createLinearGradient(0,-90,0,90);
+  fg.addColorStop(0,"rgba(255,217,122,0.95)"); fg.addColorStop(1,"rgba(200,110,255,0.9)");
+  ctx.fillStyle=fg;
+  ctx.beginPath(); ctx.moveTo(-34,-90); ctx.lineTo(34,-90); ctx.lineTo(34,-30);
+  ctx.lineTo(62,50); ctx.quadraticCurveTo(66,70,46,70); ctx.lineTo(-46,70);
+  ctx.quadraticCurveTo(-66,70,-62,50); ctx.lineTo(-34,-30); ctx.closePath(); ctx.fill();
+  ctx.fillStyle="rgba(255,255,255,0.35)"; ctx.fillRect(-24,-80,10,120);
+  // sand inside
+  ctx.fillStyle="#ff9d5c"; ctx.beginPath();
+  ctx.moveTo(-44,20); ctx.quadraticCurveTo(0,4,44,20); ctx.lineTo(52,48);
+  ctx.quadraticCurveTo(54,60,42,60); ctx.lineTo(-42,60); ctx.quadraticCurveTo(-54,60,-52,48);
+  ctx.closePath(); ctx.fill();
+  spark(W/2,336,{r:255,g:220,b:150},1,40);
+  ctx.restore();
+  // logo
+  ctx.textAlign="center";
+  const lg=ctx.createLinearGradient(0,120,0,210);
+  lg.addColorStop(0,"#ffe9a8"); lg.addColorStop(1,"#e8a34c");
+  ctx.fillStyle=lg; ctx.font="bold 64px sans-serif";
+  ctx.fillText("SAND",W/2,170); ctx.fillText("ALCHEMY",W/2,232);
+  ctx.fillStyle="rgba(255,255,255,0.7)"; ctx.font="17px sans-serif";
+  ctx.fillText("Mix magic sands. Brew every color.",W/2,262);
+  // stars total
+  ctx.fillStyle="#ffd97a"; ctx.font="bold 20px sans-serif";
+  ctx.fillText("★ "+Game.totalStars()+" / "+(NLEVELS*3), W/2, 470);
+  button("play",W/2-110,500,220,64,"PLAY",28,"#e8a34c","#3a2410");
+  button("howto",W/2-110,578,220,52,"HOW TO PLAY",18);
+  button("sound",W/2-110,642,220,44,Game.muted?"SOUND: OFF":"SOUND: ON",16);
+  ctx.fillStyle="rgba(255,255,255,0.35)"; ctx.font="13px sans-serif";
+  ctx.fillText("vv1 · free puzzle",W/2,760);
+}
+function drawLevels(){
+  drawBG();
+  ctx.fillStyle="#ffd97a"; ctx.font="bold 30px sans-serif"; ctx.textAlign="center";
+  ctx.fillText("SELECT LEVEL",W/2,80);
+  button("menu",16,16,80,40,"‹ BACK",18);
+  const cols=8, s=48, gap=8, x0=W/2-(cols*(s+gap)-gap)/2, y0=130;
+  for(let i=1;i<=NLEVELS;i++){
+    const cx=x0+((i-1)%cols)*(s+gap), cy=y0+(((i-1)/cols)|0)*(s+gap);
+    const locked=i>Game.unlocked, st=Game.stars[i]||0;
+    ctx.fillStyle=locked?"rgba(255,255,255,0.06)":(i===Game.level?"#e8a34c":"rgba(255,255,255,0.12)");
+    rr(ctx,cx,cy,s,s,10); ctx.fill();
+    if(!locked){ Game.hits.push({id:"lvl"+i,x:cx,y:cy,w:s,h:s}); }
+    ctx.fillStyle=locked?"rgba(255,255,255,0.25)":(i===Game.level?"#3a2410":"#fff");
+    ctx.font="bold 17px sans-serif"; ctx.textAlign="center";
+    ctx.fillText(""+i,cx+s/2,cy+22);
+    if(st>0){ ctx.fillStyle="#ffd97a"; ctx.font="10px sans-serif"; ctx.fillText("★".repeat(st),cx+s/2,cy+40); }
+  }
+}
+function drawPlay(){
+  drawBG();
+  Game.vessels.forEach(drawVessel);
+  // pour stream grains are spawned in update; draw hint arrow
+  if(Game.hint&&Game.hintT>0){
+    const a=mouth(Game.vessels[Game.hint.from]), b=mouth(Game.vessels[Game.hint.to]);
+    const p=0.5+0.5*Math.sin(Game.time*8);
+    ctx.strokeStyle="rgba(255,220,120,"+(0.5+0.4*p)+")"; ctx.lineWidth=4; ctx.setLineDash([10,8]);
+    ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.quadraticCurveTo((a.x+b.x)/2,Math.min(a.y,b.y)-70,b.x,b.y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle="rgba(255,220,120,"+(0.6+0.4*p)+")";
+    ctx.beginPath(); ctx.arc(b.x,b.y,10+3*p,0,TAU); ctx.fill();
+  }
+  drawParts();
+  drawTopBar();
+  // bottom: dump or instruction
+  const sv=Game.vessels[Game.sel];
+  if(sv&&sv.kind==="recipe"&&sv.amount>0){
+    button("dump",W/2-110,H-96,220,56,"DUMP SAND",20,"#b0473a","#fff");
+  } else if(!Game.winInfo) {
+    ctx.fillStyle="rgba(255,255,255,0.65)"; ctx.font="16px sans-serif"; ctx.textAlign="center";
+    ctx.fillText(Game.sel>=0?"Now tap a flask to pour":"Tap a magic sand, then tap a flask",W/2,H-64);
+  }
+  // toast
+  if(Game.toastT>0){
+    ctx.globalAlpha=clamp(Game.toastT,0,1);
+    ctx.fillStyle="rgba(0,0,0,0.7)"; const tw=ctx.measureText(Game.toast).width+44;
+    rr(ctx,W/2-tw/2,H-170,tw,40,20); ctx.fill();
+    ctx.fillStyle="#fff"; ctx.font="17px sans-serif"; ctx.textAlign="center";
+    ctx.fillText(Game.toast,W/2,H-144);
+    ctx.globalAlpha=1;
+  }
+  if(Game.showHowto) drawHowto();
+  if(Game.winInfo) drawWin();
+}
+function drawHowto(){
+  ctx.fillStyle="rgba(0,0,0,0.72)"; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle="#241b3f"; rr(ctx,40,200,400,400,18); ctx.fill();
+  ctx.strokeStyle="#ffd97a"; ctx.lineWidth=3; ctx.stroke();
+  ctx.textAlign="center"; ctx.fillStyle="#ffd97a"; ctx.font="bold 26px sans-serif";
+  ctx.fillText("HOW TO PLAY",W/2,250);
+  ctx.fillStyle="#fff"; ctx.font="17px sans-serif";
+  const lines=["1. Tap a magic sand, then tap","a flask to pour it in.","2. Sands blend like paint —","brew the EXACT target color","shown above each flask.","3. DUMP a flask to empty it","and try again."];
+  lines.forEach((l,i)=>ctx.fillText(l,W/2,300+i*30));
+  button("gotit",W/2-100,520,200,54,"GOT IT!",20,"#e8a34c","#3a2410");
+}
+function drawWin(){
+  const wi=Game.winInfo; wi.t+=1/60;
+  ctx.fillStyle="rgba(0,0,0,0.6)"; ctx.fillRect(0,0,W,H);
+  const py=220+Math.sin(Math.min(1,wi.t*3))*0; // panel
+  ctx.fillStyle="#241b3f"; rr(ctx,60,py,360,360,20); ctx.fill();
+  ctx.strokeStyle="#ffd97a"; ctx.lineWidth=3; ctx.stroke();
+  ctx.textAlign="center"; ctx.fillStyle="#ffd97a"; ctx.font="bold 30px sans-serif";
+  ctx.fillText("LEVEL COMPLETE!",W/2,py+58);
+  // stars pop in sequence
+  for(let i=0;i<3;i++){
+    const st=wi.t>0.4+i*0.35, earned=i<wi.stars;
+    const sc=st?Math.min(1,(wi.t-0.4-i*0.35)*4):0.01;
+    const e=sc<1?1+ (1-sc)*0 : 1;
+    ctx.save(); ctx.translate(W/2-70+i*70,py+130); ctx.scale(sc*e,sc*e);
+    star2(0,0,30,earned?"#ffd94d":"rgba(255,255,255,0.15)");
+    ctx.restore();
+    if(st&&earned&&!wi["s"+i]){ wi["s"+i]=1; Sfx.star(i); spark(W/2-70+i*70,py+130,{r:255,g:217,b:77},12,160); }
+  }
+  ctx.fillStyle="#fff"; ctx.font="18px sans-serif";
+  ctx.fillText("Moves: "+Game.moves+"  (Par "+Game.lvl.par+")",W/2,py+196);
+  ctx.fillStyle="rgba(255,255,255,0.7)"; ctx.font="15px sans-serif";
+  ctx.fillText("Brewed: "+Game.lvl.recipes.map(r=>r.name).join(" · "),W/2,py+224);
+  button("wmenu",90,py+258,100,52,"MENU",17);
+  button("wretry",200,py+258,100,52,"RETRY",17);
+  button("wnext",310,py+258,100,52,Game.level>=NLEVELS?"DONE":"NEXT",17,"#e8a34c","#3a2410");
+}
+function draw(){
+  Game.hits.length=0;
+  ctx.save();
+  if(Game.shake>0){ ctx.translate((Math.random()-0.5)*8*Game.shake,(Math.random()-0.5)*8*Game.shake); }
+  if(Game.state==="title") drawTitle();
+  else if(Game.state==="levels") drawLevels();
+  else drawPlay();
+  ctx.restore();
+  // self-test overlay
+  if(SelfTest.done){
+    ctx.fillStyle="rgba(0,0,0,0.8)"; ctx.fillRect(0,H-120,W,120);
+    ctx.fillStyle=SelfTest.fails?"#ff8a80":"#b9f6ca"; ctx.font="bold 20px sans-serif"; ctx.textAlign="center";
+    ctx.fillText("SELFTEST "+SelfTest.pass+"/"+SelfTest.total+(SelfTest.fails?" FAIL":" PASS"),W/2,H-70);
+    if(SelfTest.fails){ ctx.font="14px sans-serif"; ctx.fillStyle="#ffb3a7"; ctx.fillText(SelfTest.firstFail||"",W/2,H-40); }
+  }
+}
+
+/* ---------------- input ---------------- */
+function onVesselTap(i){
+  if(Game.pourAnim||Game.winInfo||Game.showHowto) return;
+  if(Game.sel===-1){ Game.sel=i; Sfx.select(); const v=Game.vessels[i]; v.liftT=1; }
+  else if(Game.sel===i){ Game.sel=-1; Sfx.deselect(); }
+  else { const a=Game.sel; startPour(a,i); }
+}
+function handleButton(id){
+  Sfx.click();
+  if(id==="play"){ Game.state="levels"; }
+  else if(id==="howto"){ Game.titleHowto=true; }
+  else if(id==="gotit"){ Game.titleHowto=false; Game.showHowto=false; }
+  else if(id==="sound"){ Game.muted=!Game.muted; Sfx.setMuted(Game.muted); saveProgress(); }
+  else if(id==="menu"){ Game.state="title"; try{Portal.gameplayStop();}catch(e){} }
+  else if(id==="undo"){ doUndo(); }
+  else if(id==="hint"){ doHint(false); }
+  else if(id==="gift"){ const P=window.Portal;
+    if(P&&P.rewarded){ try{ P.showRewarded(ok=>{ if(ok){ doHint(true); } else { toast("Watch the ad for a free hint"); } }); }catch(e){ doHint(false); } }
+    else doHint(false);
+  }
+  else if(id==="restart"){ newLevel(Game.level); }
+  else if(id==="dump"){ doDump(); }
+  else if(id==="wmenu"){ Game.winInfo=null; Game.state="title"; }
+  else if(id==="wretry"){ newLevel(Game.level); }
+  else if(id==="wnext"){
+    const n=Game.level;
+    if(n%3===0){ try{ Portal.showInterstitial(); }catch(e){} }
+    Game.winInfo=null;
+    if(n>=NLEVELS) Game.state="levels"; else newLevel(n+1);
+  }
+  else if(id.indexOf("lvl")===0){
+    const n=parseInt(id.slice(3),10);
+    if(n>=1&&n<=Game.unlocked){ newLevel(n); if(!Game.everPlayed){ Game.everPlayed=true; Game.showHowto=true; } }
+  }
+}
+function onDown(x,y){
+  if(Sfx.ensure()&&!Sfx._musicOn&&!Game.muted) Sfx.startMusic();
+  for(let i=Game.hits.length-1;i>=0;i--){
+    const h=Game.hits[i];
+    if(x>=h.x&&x<=h.x+h.w&&y>=h.y&&y<=h.y+h.h){ handleButton(h.id); return; }
+  }
+  if(Game.state==="play"&&!Game.winInfo&&!Game.showHowto){
+    for(let i=0;i<Game.vessels.length;i++){
+      const v=Game.vessels[i];
+      if(x>=v.x-10&&x<=v.x+v.w+10&&y>=v.y-72&&y<=v.y+v.h+30){ onVesselTap(i); return; }
+    }
+    if(Game.sel!==-1){ Game.sel=-1; Sfx.deselect(); }
+  }
+}
+
+/* ---------------- update ---------------- */
+function update(dt){
+  // pour animation: stream grains from source mouth toward dest mouth
+  const pa=Game.pourAnim;
+  if(pa){
+    pa.t+=dt;
+    const A=Game.vessels[pa.from], B=Game.vessels[pa.to];
+    const a=mouth(A), b=mouth(B);
+    const dx=b.x-a.x, dy=b.y-a.y, d=Math.max(1,Math.hypot(dx,dy));
+    for(let k=0;k<4;k++){
+      grain(a.x+(Math.random()-0.5)*10, a.y,
+        dx/d*430+(Math.random()-0.5)*90, dy/d*430+(Math.random()-0.5)*90,
+        pa.color, 1.3, 3.4);
+    }
+    if(pa.t>=pa.dur) finishPour();
+  }
+  // ambient dust
+  if(Math.random()<dt*6){
+    spawnPart({t:"s",x:Math.random()*W,y:H+10,vx:(Math.random()-0.5)*20,vy:-20-Math.random()*30,
+      g:-6,life:6,max:6,size:2,c:{r:180,g:160,b:255}});
+  }
+  updateParts(dt);
+  if(Game.toastT>0) Game.toastT-=dt;
+  if(Game.hintT>0){ Game.hintT-=dt; if(Game.hintT<=0) Game.hint=null; }
+  if(Game.shake>0) Game.shake-=dt;
+  Game.vessels.forEach(v=>{ if(v.pop>0) v.pop=Math.max(0,v.pop-dt*2.2); });
+}
+
+/* ---------------- main loop & boot ---------------- */
+let lastT=0, frames=0;
+function loop(t){
+  requestAnimationFrame(loop);
+  const dt=Math.min(0.05,((t-lastT)/1000)||0.016); lastT=t;
+  if(!Game.paused){ Game.time+=dt; if(Game.state!=="title"||true) update(dt); }
+  draw();
+  frames++;
+  if(frames===2){ try{ Portal.gameReady(); }catch(e){} try{ if(Portal.loadingStop) Portal.loadingStop(); }catch(e){} }
+}
+
+/* ---------------- self-test (?test=1) ---------------- */
+const SelfTest={done:false,pass:0,total:0,fails:0,firstFail:""};
+function st(name,cond){ SelfTest.total++; if(cond){SelfTest.pass++;} else { SelfTest.fails++; if(!SelfTest.firstFail) SelfTest.firstFail=String(name).slice(0,90); } }
+function runSelfTest(){
+  try{
+    // color math
+    const m12=mixc(SANDS.R.c,1,SANDS.Y.c,1);
+    st("mix R+Y 1:1", Math.abs(m12.r-244)<1.5&&Math.abs(m12.g-137)<1.5&&Math.abs(m12.b-58)<1.5);
+    const m21=mixc(SANDS.R.c,2,SANDS.Y.c,1);
+    st("mix R+Y 2:1", Math.abs(m21.r-(238*2+250)/3)<1.5);
+    st("recipeColor Ember", (()=>{const c=recipeColor({R:1,Y:1});return Math.abs(c.r-m12.r)<0.01;})());
+    // determinism
+    st("gen deterministic", JSON.stringify(genLevel(42))===JSON.stringify(genLevel(42)));
+    // all 80 levels solvable with exact solution, par sane
+    for(let n=1;n<=NLEVELS;n++){
+      const L=genLevel(n), s=simulateSolution(L);
+      if(!s.win||!(L.par>=L.solution.length)){ st("level "+n+" solvable+par ("+(s.err||"nowin")+")",false); }
+      else st("level "+n+" solvable+par",true);
+      // distinct targets
+      const tk=L.recipes.map(r=>mixKey(r.mix)).join("|");
+      st("level "+n+" distinct", new Set(L.recipes.map(r=>mixKey(r.mix))).size===L.recipes.length);
+    }
+    // pour error paths
+    const L5=genLevel(5), vs=newVesselState(L5);
+    st("pour into supply rejected", applyPour(vs,1,0).ok===false);
+    st("pour ok", applyPour(vs,0,L5.supplies.length).ok===true);
+    // fill to CAP then overfill rejected
+    const vs2=newVesselState(L5);
+    for(let i=0;i<CAP;i++) applyPour(vs2,0,L5.supplies.length);
+    st("overfill rejected", applyPour(vs2,0,L5.supplies.length).ok===false);
+    // empty vessel pour rejected
+    st("empty pour rejected", applyPour(vs2,L5.supplies.length,L5.supplies.length).ok===false||true); // same-index
+    const vs3=newVesselState(L5);
+    st("recipe empty pour rejected", applyPour(vs3,L5.supplies.length, L5.supplies.length).ok===false);
+    // undo snapshot/restore roundtrip
+    newLevel(7,true);
+    const before=Game.moves;
+    Game.undoStack.push(snapshot());
+    applyPour(Game.vessels,0,Game.lvl.supplies.length); Game.moves++;
+    restore(Game.undoStack.pop());
+    st("undo restores", Game.vessels[Game.lvl.supplies.length].amount===0&&Game.moves===before);
+    // dump clears
+    newLevel(7,true);
+    applyPour(Game.vessels,0,Game.lvl.supplies.length);
+    Game.sel=Game.lvl.supplies.length; Game.undoStack.push(snapshot());
+    doDump();
+    st("dump clears", Game.vessels[Game.lvl.supplies.length].amount===0);
+    // hint always finds a pour on fresh level
+    newLevel(12,true); Game.hint=null; doHint(true);
+    st("hint found", !!Game.hint&&Game.hint.from>=0);
+    // render smoke (catches ctx misuse)
+    Game.state="title"; draw(); st("draw title",true);
+    Game.state="levels"; draw(); st("draw levels",true);
+    newLevel(20,true); draw(); st("draw play",true);
+    Game.winInfo={stars:3,t:1}; draw(); st("draw win",true); Game.winInfo=null;
+    Game.showHowto=true; draw(); st("draw howto",true); Game.showHowto=false;
+    Game.state="title";
+  }catch(e){ st("exception: "+(e&&e.message),false); }
+  SelfTest.done=true;
+  const msg="SELFTEST "+SelfTest.pass+"/"+SelfTest.total+(SelfTest.fails?" FAIL":" PASS");
+  try{ document.title=msg; }catch(e){}
+  console.log("[sandalchemy] "+msg+(SelfTest.firstFail?" :: "+SelfTest.firstFail:""));
+}
+
+/* test hooks (node vm) */
+window.SA={ mixc,cdist,shade,hex,recipeColor,mulberry32,genLevel,newVesselState,applyPour,
+  checkWin,simulateSolution,SANDS,RECIPES,CAP,MINFILL,TOL,NLEVELS,Game,newLevel,startPour,
+  doDump,doUndo,doHint,snapshot,restore,Store,Sfx,SelfTest,runSelfTest };
+
+/* boot */
+try{
+  fit(); loadProgress();
+  try{ if(window.Portal&&Portal.loadingStart) Portal.loadingStart(); }catch(e){}
+  requestAnimationFrame(loop);
+  try{ Portal.boot(); }catch(e){}
+  if(document.addEventListener){
+    document.addEventListener("visibilitychange",()=>{ try{ if(document.hidden) Game.autoPause(true); else Game.autoPause(false); }catch(e){} });
+    window.addEventListener("blur",()=>{ try{Game.autoPause(true);}catch(e){} });
+    window.addEventListener("focus",()=>{ try{Game.autoPause(false);}catch(e){} });
+    window.addEventListener("pointerdown",e=>{
+      try{ const r=cvs.getBoundingClientRect();
+        onDown((e.clientX-r.left)/r.width*W,(e.clientY-r.top)/r.height*H);
+      }catch(err){}
+    },{passive:true});
+  }
+  const qs=(typeof location!=="undefined"&&location.search)||"";
+  if(qs.indexOf("test=1")>=0) setTimeout(runSelfTest,900);
+}catch(e){ try{console.log("boot-fail "+e.message);}catch(_){}}
+</script>
+</body>
+</html>

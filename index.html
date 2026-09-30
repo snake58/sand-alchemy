@@ -14,7 +14,24 @@
 <meta name="twitter:title" content="Sand Alchemy">
 <meta name="twitter:description" content="Pour and mix magic colored sands to brew every potion color! Play free!">
 <meta name="twitter:image" content="https://snake58.github.io/sand-alchemy/og-image.jpg">
-
+<script>
+/* CrazyGames SDK v3 en carga ASYNC: el juego pinta el título de inmediato sin
+   esperar al CDN. El adaptador (Portal.boot) espera a window.__cgReady antes
+   de llamar a init(); los gameplayStart tempranos se encolan y reenvían. */
+window.__cgReady = new Promise(function (res) {
+  var done = false;
+  function fin(){ if (!done) { done = true; res(); } }
+  try {
+    var s = document.createElement("script");
+    s.src = "https://sdk.crazygames.com/crazygames-sdk-v3.js";
+    s.async = true;
+    s.onload = fin;
+    s.onerror = fin;
+    document.head.appendChild(s);
+  } catch (e) { fin(); return; }
+  setTimeout(fin, 8000); /* jamás bloquear por un CDN lento */
+});
+</script>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html,body { width:100%; height:100%; overflow:hidden; background:#141021;
@@ -30,8 +47,92 @@
 <div id="wrap"><canvas id="game" width="480" height="800"></canvas></div>
 <div id="vstamp">v1</div>
 <script>
-/* Portal: none (itch.io / standalone).
-   Sin SDK: el juego corre con localStorage y sin anuncios. */
+/* Portal: CrazyGames SDK v3 — https://docs.crazygames.com/
+   Reglas aplicadas: init con await antes que todo; gameplayStart con el primer
+   input (no al cargar); gameplayStop antes de pedir un ad; mute+pausa en
+   adStarted; reanudar en adFinished/adError; respetar settings.muteAudio;
+   sin botón de fullscreen propio (el juego no tiene); física con timestep
+   fijo (substeps en physStep); todo en inglés. */
+window.Portal = (function () {
+  var ready = false;
+  var pendingStart = false; // gameplayStart llamado antes de que init() resolviera: se reenvía al estar listo
+  var pendingLoadingStart = false; // loadingStart encolado hasta init()
+  var pendingLoadingStop = false;  // loadingStop encolado hasta init()
+  function platformMuted(){
+    try { return !!(window.CrazyGames && window.CrazyGames.SDK.game.settings.muteAudio); }
+    catch (e) { return false; }
+  }
+  function applyMute(){ try { Sfx.setMuted(platformMuted()); } catch (e) {} }
+  function sdk(){ return window.CrazyGames.SDK; }
+  function fireStart(){ try { sdk().game.gameplayStart(); } catch (e) {} }
+  function fireStop(){ try { sdk().game.gameplayStop(); } catch (e) {} }
+  var lastSig=null; // v10: dedup — el juego dispara start dos veces seguidas (tap PLAY + fin del intro)
+  function sendStart(){ if(lastSig==="start") return; lastSig="start"; try { if (ready) fireStart(); else pendingStart = true; } catch (e) {} }
+  function sendStop(){ if(lastSig==="stop") return; lastSig="stop"; try { pendingStart = false; if (ready) fireStop(); } catch (e) {} }
+  function fireLoadingStart(){ try { sdk().game.loadingStart(); } catch (e) {} }
+  function fireLoadingStop(){ try { sdk().game.loadingStop(); } catch (e) {} }
+  return {
+    name: "crazygames",
+  rewarded:false,
+    boot(){
+      try {
+        var go = function (){
+          try {
+            // Si el SDK tardó más que el timeout de __cgReady, reintentar hasta 30s
+            if (!(window.CrazyGames && window.CrazyGames.SDK)) {
+              var tries = 0;
+              var poll = setInterval(function (){
+                if (window.CrazyGames && window.CrazyGames.SDK) { clearInterval(poll); go(); }
+                else if (++tries > 60) clearInterval(poll);
+              }, 500);
+              return;
+            }
+            sdk().init().then(function (){
+              ready = true;
+              applyMute();
+              try {
+                if (sdk().game.addSettingsChangeListener)
+                  sdk().game.addSettingsChangeListener(applyMute);
+              } catch (e) {}
+              if (pendingLoadingStart) { pendingLoadingStart = false; fireLoadingStart(); }
+              if (pendingLoadingStop) { pendingLoadingStop = false; fireLoadingStop(); }
+              if (pendingStart) { pendingStart = false; lastSig="start"; fireStart(); }
+            }).catch(function (){});
+          } catch (e) {}
+        };
+        if (window.__cgReady && window.__cgReady.then) window.__cgReady.then(go);
+        else go(); /* sin cargador async (tests): init directo */
+      } catch (e) {}
+    },
+    gameReady(){},
+    /* Señales de carga explícitas: el QA puede medir "Load time" hasta loadingStop */
+    loadingStart(){ try { if (ready) fireLoadingStart(); else pendingLoadingStart = true; } catch (e) {} },
+    loadingStop(){ try { if (ready) fireLoadingStop(); else pendingLoadingStop = true; } catch (e) {} },
+    gameplayStart(){ sendStart(); },
+    gameplayStop(){ sendStop(); },
+    scoreChanged(s){},
+  showRewarded(cb){ try{cb(false);}catch(e){} },
+    showInterstitial(){
+      var self = this;
+      self.gameplayStop();
+      Game.autoPause(true); Sfx.setMuted(true);
+      var done = function (){
+        Sfx.setMuted(false); applyMute(); Game.autoPause(false);
+      };
+      try {
+        if (ready) {
+          sdk().ad.requestAd("midgame", {
+            adStarted: function (){ Sfx.setMuted(true); },
+            adFinished: done,
+            adError: done
+          });
+          // Seguridad: si los callbacks nunca llegan, reanudar a los 30s
+          setTimeout(function (){ if (Game.pausedByAd) done(); }, 30000);
+        } else done();
+      } catch (e) { done(); }
+    }
+  };
+})();
 /* SAND ALCHEMY BUILD v1 */
 "use strict";
 /* ============================================================
